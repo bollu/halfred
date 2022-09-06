@@ -1,6 +1,7 @@
 # Halfred
 ~ Partial (1/2) evaluator (Reducer)
 
+
 ## Notes
 
 ### Partial Evaluation, Chapter 1
@@ -57,6 +58,10 @@
 
 - This shows how one can bootstrap/self-apply a compiler, and these types of diagrams
   will help us reason about self application later on, in the context of partial application.
+
+### Partial Evaluation, Chapter 6
+- Let $T_p(s, d)$ be the time taken to compute $[p](s, d)$.
+- Let $p_s$ be the result of specializing $p$ to $s$.
 
 ## References
 
