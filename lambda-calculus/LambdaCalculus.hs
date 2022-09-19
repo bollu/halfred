@@ -234,7 +234,7 @@ eval2 :: Stx -> EvalM2 Val2
 eval2 (StxConst c) = pure (ValConst2 c)
 eval2 (StxVar v) = evalLookupEnv2 v
 eval2 (StxLam D xname body) =
-  pure $ ValFun2 (\xval -> evalInsertEnv2 xname xval >> eval2 body)
+  pure $ ValFun2 (\xval ->  scopedEnv2 $ evalInsertEnv2 xname xval >> eval2 body)
 eval2 (StxFix D e) = eval2 e >>= \case
   ValFun2 f -> f (ValFun2 f) -- this only works in lazy language.
   v -> evalError2 (ExpectedValConstError2 v)
