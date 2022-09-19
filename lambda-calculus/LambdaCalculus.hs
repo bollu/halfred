@@ -11,6 +11,7 @@ Authors: Siddharth Bhat
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE LambdaCase #-}
 import qualified Data.Map.Strict as M
 import Control.Monad(ap)
 import System.Environment
@@ -47,30 +48,44 @@ instance Show Const where
     show (ConstInt i) = show i
     show (ConstBool b) = show b
 
+data IsDyn where
+    S :: IsDyn
+    D :: IsDyn
 
-data Stx where
-  StxConst :: Const -> Stx
-  StxVar :: Var -> Stx
-  StxLam :: Var -> Stx -> Stx
-  StxApp :: Stx -> Stx -> Stx
-  StxIf :: Stx -> Stx -> Stx -> Stx
-  StxOp :: Opcode -> [Stx] -> Stx
+instance Show IsDyn where
+    show S = "S"
+    show D = "D"
+
+data Stx where 
+  StxConst :: Const -> Stx 
+  StxLift :: Stx -> Stx
+  StxVar :: Var -> Stx 
+  StxLam :: IsDyn -> Var -> Stx -> Stx
+  StxApp :: IsDyn -> Stx -> Stx -> Stx
+  StxIf :: IsDyn -> Stx -> Stx -> Stx -> Stx
+  StxFix :: IsDyn -> Stx -> Stx
+  StxOp :: IsDyn -> Opcode -> [Stx] -> Stx
 
 instance Show Stx where 
     show (StxConst c) = show c
     show (StxVar v) = v
-    show (StxLam v e) = "(\\" ++ v ++ " " ++ show e ++ ")"
-    show (StxApp e1 e2) = "(%" ++ show e1 ++ " " ++ show e2 ++ ")"
-    show (StxIf e1 e2 e3) = "if " ++ show e1 ++ " " ++ show e2 ++ " " ++ show e3
-    show (StxOp op es) = "(" ++ show op ++ " " ++ intercalate " " (map show es) ++ ")"
+    show (StxLift e) = "(lift " ++ show e ++ ")"
+    show (StxFix dyn e) = "(fix " ++ show dyn ++ " " ++ show e ++ ")"
+    show (StxLam dyn v e) = "(\\" ++ show dyn ++ " " ++ v ++ " " ++ show e ++ ")"
+    show (StxApp dyn e1 e2) = "($" ++ show dyn ++ " " ++ show e1 ++ " " ++ show e2 ++ ")"
+    show (StxIf dyn e1 e2 e3) = "(if " ++ show e1 ++ " " ++ show e2 ++ " " ++ show e3 ++ ")"
+    show (StxOp dyn op es) = "(" ++ show op ++ " " ++ show dyn ++ " " ++ intercalate " " (map show es) ++ ")"
+
+-- vvv L1 Evaluator vvv
 data Val where
     ValConst :: Const -> Val
-    ValFun :: (Val -> EvalM Val) -> Val
+    ValFun :: (Val -> EvalM Val)  -- encoding will not work in Lean due to universes
+       -> Val
 
 instance Show Val where 
     show (ValConst c) = show c
     show (ValFun _) = "<fun>"
-    
+
   
 type EvalEnv = M.Map Var Val
 data EvalError where 
@@ -119,21 +134,110 @@ instance Applicative EvalM where
 eval :: Stx -> EvalM Val
 eval (StxConst c) = pure (ValConst c)
 eval (StxVar v) = evalLookupEnv v
-eval (StxLam xname body) =
+eval (StxLam dyn xname body) =
   pure $ ValFun (\xval -> evalInsertEnv xname xval >> eval body)
-eval (StxApp f x) = do
+eval (StxFix dyn e) = eval e >>= \case
+  ValFun f -> f (ValFun f) -- this only works in lazy language.
+  v -> evalError (ExpectedValConstError v)
+eval (StxApp dyn f x) = do
   vf <- eval f
   vx <- eval x
   case vf of
     ValConst c -> evalError (ExpectedValFnError c)
     ValFun f -> f vx
-eval (StxIf cond t e) = do
+eval (StxIf dyn cond t e) = do
   vcond <- eval cond
   case vcond of
     ValConst (ConstBool b) -> if b then eval t else eval e
     _ -> evalError (ExpectedValConstError vcond)
 -- eval (StxOp [] )
 eval stx = evalError (UnknownStxError stx)
+
+-- ^^ L1 evaluator ^^
+
+
+-- vv L2 evaluator vv
+data Val2 where
+    ValConst2 :: Const -> Val2
+    ValFun2 :: (Val2 -> EvalM2 Val2)  -- encoding will not work in Lean due to universes
+       -> Val2
+    ValCode2 :: Stx -> Val2
+
+instance Show Val2 where 
+    show (ValConst2 c) = "<const " ++ show c ++ ">"
+    show (ValFun2 _) = "<fun>"
+    show (ValCode2 c) = "<code " ++ show c ++ " >"
+
+  
+type EvalEnv2 = M.Map Var Val2
+data EvalError2 where 
+  UnableToFindVarError2 :: Var -> EvalError2
+  ExpectedValFnError2 :: Const -> EvalError2
+  ExpectedValConstError2 :: Val2 -> EvalError2
+  UnknownStxError2 :: Stx -> EvalError2
+
+instance Show EvalError2 where 
+  show (UnableToFindVarError2 v) = "UnableToFindVarError2: " ++ v
+  show (ExpectedValFnError2 c) = "ExpectedValFnError2: " ++ show c
+  show (ExpectedValConstError2 v) = "ExpectedValConstError2: " ++ show v
+  show (UnknownStxError2 s) = "UnknownStxError2: " ++ show s
+
+data EvalM2 a =
+  EvalM2 {
+    runEvalM2 :: EvalEnv2 -> (Either EvalError2 a, EvalEnv2)
+  } deriving(Functor)
+
+
+evalLookupEnv2 :: Var -> EvalM2 Val2
+evalLookupEnv2 name =
+  EvalM2 $ \env ->
+    case M.lookup name env of
+      Just val -> (Right val, env)
+      Nothing -> (Left (UnableToFindVarError2 name), env)
+
+evalInsertEnv2 :: Var -> Val2 -> EvalM2 ()
+evalInsertEnv2 name val =
+  EvalM2 $ \env -> (Right (), M.insert name val env)
+
+evalError2 :: EvalError2 -> EvalM2 a
+evalError2 err = EvalM2 $ \env -> (Left err, env)
+
+instance Monad EvalM2 where
+  return a = EvalM2 (\env -> (return a, env))
+  ma >>= a2mb =
+    EvalM2(\env -> let (ea, env') = runEvalM2 ma env in
+             case ea of
+             Left e -> (Left e, env')
+             Right a -> let mb = a2mb a in runEvalM2 mb env')
+
+instance Applicative EvalM2 where
+  pure = return
+  (<*>) = ap
+
+eval2 :: Stx -> EvalM2 Val2
+eval2 (StxConst c) = pure (ValConst2 c)
+eval2 (StxVar v) = evalLookupEnv2 v
+eval2 (StxLam D xname body) =
+  pure $ ValFun2 (\xval -> evalInsertEnv2 xname xval >> eval2 body)
+eval2 (StxFix D e) = eval2 e >>= \case
+  ValFun2 f -> f (ValFun2 f) -- this only works in lazy language.
+  v -> evalError2 (ExpectedValConstError2 v)
+eval2 (StxApp D f x) = do
+  vf <- eval2 f
+  vx <- eval2 x
+  case vf of
+    ValConst2 c -> evalError2 (ExpectedValFnError2 c)
+    ValFun2 f -> f vx
+eval2 (StxIf D cond t e) = do
+  vcond <- eval2 cond
+  case vcond of
+    ValConst2 (ConstBool b) -> if b then eval2 t else eval2 e
+    _ -> evalError2 (ExpectedValConstError2 vcond)
+eval2 stx = evalError2 (UnknownStxError2 stx)
+
+-- ^^ L2 evaluator ^^
+
+-- vv Declarations, parsing, etc. -- 
 
 data Decl = Decl {
   declLhs :: String,
@@ -174,31 +278,42 @@ parseIntFromString s =
     [(x, "")] -> Just x
     _ -> Nothing 
 
+
+astToIsDyn :: AST -> Either Error IsDyn
+astToIsDyn ast = atom ast >>= \case
+    "S" -> pure S
+    "D" -> pure D 
+    tag -> Left $ errAtSpan (astspan ast) $ "unknown Dyn tag '" ++ show tag ++ "'"
+
+
 astToStx :: AST -> Either Error Stx 
 astToStx tuple = do
     head  <- tuplehd atom tuple
     case head of 
       "\\" -> do 
-        ((), x, body) <- tuple3f astignore atom astToStx tuple
-        return $ StxLam x body
+        ((), dyn, x, body) <- tuple4f astignore astToIsDyn atom astToStx tuple
+        return $ StxLam dyn x body
       "$" -> do 
-        ((), f, x) <- tuple3f astignore astToStx astToStx tuple
-        return $ StxApp f x
+        ((), dyn, f, x) <- tuple4f astignore astToIsDyn astToStx astToStx tuple
+        return $ StxApp dyn f x
+      "fix" -> do 
+        ((), dyn, e) <- tuple3f astignore astToIsDyn astToStx tuple
+        return $ StxFix dyn e
       "if" -> do 
-        ((), cond, t, e) <- tuple4f astignore astToStx astToStx astToStx tuple
-        return $ StxIf cond t e
+        ((), dyn, cond, t, e) <- tuple5f astignore astToIsDyn astToStx astToStx astToStx tuple
+        return $ StxIf dyn cond t e
       "+" -> do 
-        ((), lhs, rhs) <- tuple3f astignore astToStx astToStx tuple
-        return $ StxOp Add [lhs, rhs]
+        ((), dyn, lhs, rhs) <- tuple4f astignore astToIsDyn astToStx astToStx tuple
+        return $ StxOp dyn Add [lhs, rhs]
       "-" -> do
-        ((), lhs, rhs) <- tuple3f astignore astToStx astToStx tuple
-        return $ StxOp Sub [lhs, rhs]
+        ((), dyn, lhs, rhs) <- tuple4f astignore astToIsDyn astToStx astToStx tuple
+        return $ StxOp dyn Sub [lhs, rhs]
       "*" -> do
-        ((), lhs, rhs) <- tuple3f astignore astToStx astToStx tuple
-        return $ StxOp Mul [lhs, rhs]
+        ((), dyn, lhs, rhs) <- tuple4f astignore astToIsDyn astToStx astToStx tuple
+        return $ StxOp dyn Mul [lhs, rhs]
       "==" -> do
-        ((), lhs, rhs) <- tuple3f astignore astToStx astToStx tuple
-        return $ StxOp CondEq [lhs, rhs]
+        ((), dyn, lhs, rhs) <- tuple4f astignore astToIsDyn astToStx astToStx tuple
+        return $ StxOp dyn CondEq [lhs, rhs]
       str -> do 
         case parseIntFromString str of 
           Just i -> pure $ StxConst $ ConstInt i
@@ -213,6 +328,9 @@ astToDecl :: AST -> Either Error Decl
 astToDecl tuple = do
   (_, name, rhs) <- tuple3f (atomString "decl") atom astToStx tuple 
   return $ Decl name rhs
+
+
+-- TODO: Type system to derive static/dynamic annotations
 
 main :: IO ()
 main = do
@@ -239,3 +357,4 @@ main = do
             Right val -> output { outputValues = M.insert (declLhs decl) val (outputValues output) }
           ) mempty decls
   print out
+
