@@ -1,3 +1,4 @@
+#!/usr/bin/env runghc
 {-
 Released under Apache 2.0 license as described in the file LICENSE.
 Authors: Siddharth Bhat
@@ -376,6 +377,9 @@ astToStx tuple = do
         ((), dyn, e) <- tuple3f astignore astToIsDyn astToStx tuple
         return $ StxFix dyn e
       "lift" -> do 
+        ((), e) <- tuple2f astignore astToStx tuple
+        return $ StxLift e
+      "comptime" -> do 
         ((), e) <- tuple2f astignore astToStx tuple
         return $ StxLift e
       "if" -> do 
