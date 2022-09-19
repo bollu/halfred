@@ -20,6 +20,7 @@ import Data.List
 import AST
 import Data.Either
 import Control.Monad(foldM)
+import GHC.Stack
 
 type Var = String
 -- Variables for locally nameless
@@ -169,7 +170,7 @@ instance Show Val2 where
 type EvalEnv2 = M.Map Var Val2
 data EvalError2 where 
   UnableToFindVarError2 :: Var -> EvalError2
-  ExpectedValFnError2 :: Const -> EvalError2
+  ExpectedValFnError2 :: Val2 -> EvalError2
   ExpectedValConstError2 :: Val2 -> EvalError2
   ExpectedValCode2 :: Val2 -> EvalError2
   UnknownStxError2 :: Stx -> EvalError2
@@ -188,32 +189,37 @@ data EvalM2 a =
   } deriving(Functor)
 
 
-evalLookupEnv2 :: Var -> EvalM2 Val2
+evalLookupEnv2 :: HasCallStack => Var -> EvalM2 Val2
 evalLookupEnv2 name =
   EvalM2 $ \env ->
     case M.lookup name env of
       Just val -> (Right val, env)
       Nothing -> (Left (UnableToFindVarError2 name), env)
 
-evalInsertEnv2 :: Var -> Val2 -> EvalM2 ()
+evalInsertEnv2 :: HasCallStack => Var -> Val2 -> EvalM2 ()
 evalInsertEnv2 name val =
   EvalM2 $ \env -> (Right (), M.insert name val env)
 
-scopedEnv2 :: EvalM2 a -> EvalM2 a
+scopedEnv2 :: HasCallStack => EvalM2 a -> EvalM2 a
 scopedEnv2 (EvalM2 f) = EvalM2 $ \env -> let (val, env') = f env in (val, env)
 
-evalError2 :: EvalError2 -> EvalM2 a
-evalError2 err = EvalM2 $ \env -> (Left err, env)
+evalError2 :: HasCallStack => EvalError2 -> EvalM2 a
+-- evalError2 err = EvalM2 $ \env -> (Left err, env)
+evalError2 err = EvalM2 $ \env -> error $ show (err, env)
 
-evalFreshName2 :: Var -> EvalM2 Var
+evalFreshName2 :: HasCallStack => Var -> EvalM2 Var
 evalFreshName2 v = pure (v ++ ".f")
 
-val2ToConst2 :: Val2 -> EvalM2 Const
+val2ToConst2 :: HasCallStack => Val2 -> EvalM2 Const
 val2ToConst2 (ValConst2 c) = pure c
 val2ToConst2 v = evalError2 $ ExpectedValConstError2 v
 
 
-val2ToCode2 :: Val2 -> EvalM2 Stx
+val2ToValFun2 :: HasCallStack => Val2 -> EvalM2 (Val2 -> EvalM2 Val2)
+val2ToValFun2 (ValFun2 f) = pure f
+val2ToValFun2 v = evalError2 $ ExpectedValFnError2 v
+
+val2ToCode2 :: HasCallStack => Val2 -> EvalM2 Stx
 val2ToCode2 (ValCode2 c) = pure c
 val2ToCode2 v = evalError2 $ ExpectedValCode2 v
 
@@ -230,25 +236,22 @@ instance Applicative EvalM2 where
   pure = return
   (<*>) = ap
 
-eval2 :: Stx -> EvalM2 Val2
+eval2 :: HasCallStack => Stx -> EvalM2 Val2
 eval2 (StxConst c) = pure (ValConst2 c)
 eval2 (StxVar v) = evalLookupEnv2 v
 eval2 (StxLam D xname body) =
-  pure $ ValFun2 (\xval ->  scopedEnv2 $ evalInsertEnv2 xname xval >> eval2 body)
+  pure $ ValFun2 (\xval ->  evalInsertEnv2 xname xval >> eval2 body)
 eval2 (StxFix D e) = eval2 e >>= \case
   ValFun2 f -> f (ValFun2 f) -- this only works in lazy language.
   v -> evalError2 (ExpectedValConstError2 v)
 eval2 (StxApp D f x) = do
-  vf <- eval2 f
+  vf <- eval2 f >>= val2ToValFun2
   vx <- eval2 x
-  case vf of
-    ValConst2 c -> evalError2 (ExpectedValFnError2 c)
-    ValFun2 f -> f vx
+  vf vx
+
 eval2 (StxIf D cond t e) = do
-  vcond <- eval2 cond
-  case vcond of
-    ValConst2 (ConstInt i) -> if i /= 0 then eval2 t else eval2 e
-    _ -> evalError2 (ExpectedValConstError2 vcond)
+  (ConstInt i) <- eval2 cond >>= val2ToConst2
+  if i /= 0 then eval2 t else eval2 e
 eval2 (StxOp D Mul [a, b]) = do
   (ConstInt i) <- eval2 a >>= val2ToConst2
   (ConstInt j) <- eval2 b >>= val2ToConst2
@@ -270,11 +273,12 @@ eval2 (StxLift stx) = do
     _ ->  evalError2 (ExpectedValConstError2 v)
 eval2 (StxLam S xname body) = do -- readback!
     xname' <- evalFreshName2 xname
-    body' <- scopedEnv2 $ do  
+    -- body' <- scopedEnv2 $ do  
+    body' <- do 
        evalInsertEnv2 xname (ValCode2 (StxVar xname'))
        eval2 body
     body' <- val2ToCode2 body'
-    return  $ ValCode2 (StxLam D xname body')
+    return  $ ValCode2 (StxLam D xname' body')
 eval2 (StxApp S f x) = do -- readback!
     cf <- eval2 f >>= val2ToCode2
     cx <- eval2 x >>= val2ToCode2
@@ -308,7 +312,7 @@ data Decl = Decl {
 --   return v -- return to toplevel
 
 
-declEval2 :: Decl -> EvalM2 Val2
+declEval2 :: HasCallStack => Decl -> EvalM2 Val2
 declEval2 decl = do
   v <- eval2 (declRhs decl) -- evaluate
   evalInsertEnv2 (declLhs decl) v -- add to env
@@ -332,8 +336,8 @@ instance Semigroup Output where
 instance Show Output where 
     show (Output errs vals env) = 
         "Errors: " ++ show (M.toList errs) ++
-        "\nOutputs: " ++ show (M.toList vals) ++
-        "\nEnvironment: " ++ show (M.toList env)
+        "\nOutputs:\n  " ++ intercalate "\n  " (map show $ M.toList vals) ++
+        "\nEnvironment:\n  " ++ intercalate "\n  " (map show $ M.toList env)
         
   
 parseIntFromString :: String -> Maybe Int
@@ -392,15 +396,20 @@ astToStx tuple = do
       _ -> Left $ errAtSpan (astspan tuple) $ "Unexpected tuple head: " ++ show head
 
 -- (decl <name> <rhs>)
-astToDecl :: AST -> Either Error Decl 
+astToDecl :: AST -> Either Error [Decl]
 astToDecl tuple = do
-  (_, name, rhs) <- tuple3f (atomString "decl") atom astToStx tuple 
-  return $ Decl name rhs
+  head  <- tuplehd atom tuple
+  case head of
+    "decl" -> do 
+      (_, name, rhs) <- tuple3f (atomString "decl") atom astToStx tuple 
+      return $ [Decl name rhs]
+    "--" -> return []
+    _ -> Left $ errAtSpan (astspan tuple) $ "Unexpected head, expected '--' or 'decl'. Unexpected: " ++ show head
 
 
 -- TODO: Type system to derive static/dynamic annotations
 
-main :: IO ()
+main :: HasCallStack => IO ()
 main = do
   args <- getArgs
   path <- case args of
@@ -415,7 +424,7 @@ main = do
            Right success -> pure success
   putStrLn $ astPretty ast
   putStrLn $ "convering to intermediate repr..."
-  decls <- case tuplefor astToDecl ast of
+  decls <- case tuplefor' astToDecl ast of
             Left failure -> putStrLn failure >> exitFailure
             Right d -> pure d
   let out = foldl (\output decl -> 

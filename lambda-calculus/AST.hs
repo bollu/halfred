@@ -268,6 +268,16 @@ tuplefor f (Atom span _) =
     "expected tuple, found atom."
 tuplefor f (Tuple span _ xs) = M.forM xs f 
 
+
+tuplefor' :: (AST -> Either Error [a]) -> AST -> Either Error [a]
+tuplefor' f (Atom span _) =
+  Left $ errAtSpan span $ 
+    "expected tuple, found atom."
+tuplefor' f (Tuple span _ xs) = 
+    case M.forM xs f of
+        Left err -> Left err
+        Right xss -> pure $ M.join xss
+
 atomOneOf :: [String] -> AST -> Either Error String
 atomOneOf _ (Tuple span _ xs) = 
   Left $ errAtSpan span $
@@ -287,9 +297,13 @@ tuplehd f atom@(Atom span _) =
             "|" ++ astPretty atom ++ "|"
 tuplehd f (Tuple span delim (x:xs)) = f x
 
+
 tupletail:: (AST -> Either Error a) -> AST -> Either Error [a]
 tupletail _ atom@(Atom span _) = 
   Left $ errAtSpan span $ "expected tuple, found atom." ++
             "|" ++ astPretty atom ++ "|"
 tupletail f (Tuple span delim (x:xs)) = do
   M.forM xs f 
+
+tuplecadr :: (AST -> Either Error a) -> AST -> Either Error a
+tuplecadr f ast = ((!! 0) <$> tupletail pure ast) >>= f
