@@ -42,11 +42,9 @@ instance Show Opcode where
 
 data Const where
     ConstInt :: Int -> Const
-    ConstBool :: Bool -> Const
 
 instance Show Const where 
     show (ConstInt i) = show i
-    show (ConstBool b) = show b
 
 data IsDyn where
     S :: IsDyn
@@ -67,14 +65,14 @@ data Stx where
   StxOp :: IsDyn -> Opcode -> [Stx] -> Stx
 
 instance Show Stx where 
-    show (StxConst c) = show c
-    show (StxVar v) = v
+    show (StxConst c) = "(const " ++ show c ++ ")"
+    show (StxVar v) = "(var " ++ v ++ ")"
     show (StxLift e) = "(lift " ++ show e ++ ")"
     show (StxFix dyn e) = "(fix " ++ show dyn ++ " " ++ show e ++ ")"
     show (StxLam dyn v e) = "(\\" ++ show dyn ++ " " ++ v ++ " " ++ show e ++ ")"
     show (StxApp dyn e1 e2) = "($" ++ show dyn ++ " " ++ show e1 ++ " " ++ show e2 ++ ")"
     show (StxIf dyn e1 e2 e3) = "(if " ++ show e1 ++ " " ++ show e2 ++ " " ++ show e3 ++ ")"
-    show (StxOp dyn op es) = "(" ++ show op ++ " " ++ show dyn ++ " " ++ intercalate " " (map show es) ++ ")"
+    show (StxOp dyn op es) = "(op " ++ show op ++ " " ++ show dyn ++ " " ++ intercalate " " (map show es) ++ ")"
 
 -- vvv L1 Evaluator vvv
 data Val where
@@ -148,8 +146,7 @@ eval (StxApp dyn f x) = do
 eval (StxIf dyn cond t e) = do
   vcond <- eval cond
   case vcond of
-    ValConst (ConstBool b) -> if b then eval t else eval e
-    _ -> evalError (ExpectedValConstError vcond)
+    ValConst (ConstInt i) -> if i /= 0 then eval t else eval e
 -- eval (StxOp [] )
 eval stx = evalError (UnknownStxError stx)
 
@@ -164,9 +161,9 @@ data Val2 where
     ValCode2 :: Stx -> Val2
 
 instance Show Val2 where 
-    show (ValConst2 c) = "<const " ++ show c ++ ">"
+    show (ValConst2 c) = "<const '" ++ show c ++ "'>"
     show (ValFun2 _) = "<fun>"
-    show (ValCode2 c) = "<code " ++ show c ++ " >"
+    show (ValCode2 c) = "<code '" ++ show c ++ "'>"
 
   
 type EvalEnv2 = M.Map Var Val2
@@ -250,8 +247,21 @@ eval2 (StxApp D f x) = do
 eval2 (StxIf D cond t e) = do
   vcond <- eval2 cond
   case vcond of
-    ValConst2 (ConstBool b) -> if b then eval2 t else eval2 e
+    ValConst2 (ConstInt i) -> if i /= 0 then eval2 t else eval2 e
     _ -> evalError2 (ExpectedValConstError2 vcond)
+eval2 (StxOp D Mul [a, b]) = do
+  (ConstInt i) <- eval2 a >>= val2ToConst2
+  (ConstInt j) <- eval2 b >>= val2ToConst2
+  return (ValConst2 (ConstInt $ i*j))
+eval2 (StxOp D Sub [a, b]) = do
+  (ConstInt i) <- eval2 a >>= val2ToConst2
+  (ConstInt j) <- eval2 b >>= val2ToConst2
+  return (ValConst2 (ConstInt $ i-j))
+eval2 (StxOp D CondEq [a, b]) = do
+  (ConstInt i) <- eval2 a >>= val2ToConst2
+  (ConstInt j) <- eval2 b >>= val2ToConst2
+  return (ValConst2 (ConstInt $ if i == j then 1 else 0))
+
 -- fun rules
 eval2 (StxLift stx) = do
   v <- eval2 stx
@@ -291,17 +301,24 @@ data Decl = Decl {
   declRhs :: Stx
 }
 
-declEval :: Decl -> EvalM Val
-declEval decl = do
-  v <- eval (declRhs decl) -- evaluate
-  evalInsertEnv (declLhs decl) v -- add to env
+-- declEval :: Decl -> EvalM Val
+-- declEval decl = do
+--   v <- eval (declRhs decl) -- evaluate
+--   evalInsertEnv (declLhs decl) v -- add to env
+--   return v -- return to toplevel
+
+
+declEval2 :: Decl -> EvalM2 Val2
+declEval2 decl = do
+  v <- eval2 (declRhs decl) -- evaluate
+  evalInsertEnv2 (declLhs decl) v -- add to env
   return v -- return to toplevel
 
 -- | Output of running a program.
 data Output = Output { 
-    outputErrors :: M.Map String EvalError 
-    , outputValues :: M.Map String Val
-    , outputEnv :: EvalEnv
+    outputErrors :: M.Map String EvalError2
+    , outputValues :: M.Map String Val2
+    , outputEnv :: EvalEnv2
 }
 -- | Note: the monoid takes the environment of the
 -- | right output. This is because we want to evaluate
@@ -314,9 +331,9 @@ instance Semigroup Output where
 
 instance Show Output where 
     show (Output errs vals env) = 
-        "Errors: " ++ show errs ++
-        "Outputs: " ++ show vals ++
-        "Environment: " ++ show env
+        "Errors: " ++ show (M.toList errs) ++
+        "\nOutputs: " ++ show (M.toList vals) ++
+        "\nEnvironment: " ++ show (M.toList env)
         
   
 parseIntFromString :: String -> Maybe Int
@@ -334,6 +351,14 @@ astToIsDyn ast = atom ast >>= \case
 
 
 astToStx :: AST -> Either Error Stx 
+astToStx a@(Atom span str) = 
+    case parseIntFromString str of 
+      Just i -> pure $ StxConst $ ConstInt i
+      Nothing -> 
+        case str of 
+          "true" -> pure $ StxConst $ ConstInt 1
+          "false" -> pure $ StxConst $ ConstInt 0
+          _ -> pure $ StxVar str
 astToStx tuple = do
     head  <- tuplehd atom tuple
     case head of 
@@ -346,6 +371,9 @@ astToStx tuple = do
       "fix" -> do 
         ((), dyn, e) <- tuple3f astignore astToIsDyn astToStx tuple
         return $ StxFix dyn e
+      "lift" -> do 
+        ((), e) <- tuple2f astignore astToStx tuple
+        return $ StxLift e
       "if" -> do 
         ((), dyn, cond, t, e) <- tuple5f astignore astToIsDyn astToStx astToStx astToStx tuple
         return $ StxIf dyn cond t e
@@ -361,14 +389,7 @@ astToStx tuple = do
       "==" -> do
         ((), dyn, lhs, rhs) <- tuple4f astignore astToIsDyn astToStx astToStx tuple
         return $ StxOp dyn CondEq [lhs, rhs]
-      str -> do 
-        case parseIntFromString str of 
-          Just i -> pure $ StxConst $ ConstInt i
-          Nothing -> 
-            case str of 
-              "true" -> pure $ StxConst $ ConstBool True
-              "false" -> pure $ StxConst $ ConstBool False
-              _ -> pure $ StxVar str
+      _ -> Left $ errAtSpan (astspan tuple) $ "Unexpected tuple head: " ++ show head
 
 -- (decl <name> <rhs>)
 astToDecl :: AST -> Either Error Decl 
@@ -398,10 +419,10 @@ main = do
             Left failure -> putStrLn failure >> exitFailure
             Right d -> pure d
   let out = foldl (\output decl -> 
-          let (eitherValErr, env') = runEvalM (declEval decl) (outputEnv output)  in
+          let (eitherValErr, env') = runEvalM2 (declEval2 decl) (outputEnv output)  in
           case eitherValErr of 
-            Left err -> output { outputErrors = M.insert (declLhs decl) err (outputErrors output) }
-            Right val -> output { outputValues = M.insert (declLhs decl) val (outputValues output) }
+            Left err -> output { outputErrors = M.insert (declLhs decl) err (outputErrors output), outputEnv = env' }
+            Right val -> output { outputValues = M.insert (declLhs decl) val (outputValues output), outputEnv = env' }
           ) mempty decls
   print out
 
