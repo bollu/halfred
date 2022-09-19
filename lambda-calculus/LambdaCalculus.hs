@@ -13,7 +13,7 @@ Authors: Siddharth Bhat
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE LambdaCase #-}
 import qualified Data.Map.Strict as M
-import Control.Monad(ap)
+import Control.Monad(ap, forM, (>=>))
 import System.Environment
 import System.Exit
 import Data.List
@@ -174,12 +174,15 @@ data EvalError2 where
   UnableToFindVarError2 :: Var -> EvalError2
   ExpectedValFnError2 :: Const -> EvalError2
   ExpectedValConstError2 :: Val2 -> EvalError2
+  ExpectedValCode2 :: Val2 -> EvalError2
   UnknownStxError2 :: Stx -> EvalError2
+
 
 instance Show EvalError2 where 
   show (UnableToFindVarError2 v) = "UnableToFindVarError2: " ++ v
   show (ExpectedValFnError2 c) = "ExpectedValFnError2: " ++ show c
   show (ExpectedValConstError2 v) = "ExpectedValConstError2: " ++ show v
+  show (ExpectedValCode2 v) = "ExpectedValCodeError2: " ++ show v
   show (UnknownStxError2 s) = "UnknownStxError2: " ++ show s
 
 data EvalM2 a =
@@ -199,8 +202,24 @@ evalInsertEnv2 :: Var -> Val2 -> EvalM2 ()
 evalInsertEnv2 name val =
   EvalM2 $ \env -> (Right (), M.insert name val env)
 
+scopedEnv2 :: EvalM2 a -> EvalM2 a
+scopedEnv2 (EvalM2 f) = EvalM2 $ \env -> let (val, env') = f env in (val, env)
+
 evalError2 :: EvalError2 -> EvalM2 a
 evalError2 err = EvalM2 $ \env -> (Left err, env)
+
+evalFreshName2 :: Var -> EvalM2 Var
+evalFreshName2 v = pure (v ++ ".f")
+
+val2ToConst2 :: Val2 -> EvalM2 Const
+val2ToConst2 (ValConst2 c) = pure c
+val2ToConst2 v = evalError2 $ ExpectedValConstError2 v
+
+
+val2ToCode2 :: Val2 -> EvalM2 Stx
+val2ToCode2 (ValCode2 c) = pure c
+val2ToCode2 v = evalError2 $ ExpectedValCode2 v
+
 
 instance Monad EvalM2 where
   return a = EvalM2 (\env -> (return a, env))
@@ -233,6 +252,34 @@ eval2 (StxIf D cond t e) = do
   case vcond of
     ValConst2 (ConstBool b) -> if b then eval2 t else eval2 e
     _ -> evalError2 (ExpectedValConstError2 vcond)
+-- fun rules
+eval2 (StxLift stx) = do
+  v <- eval2 stx
+  case v of
+    ValConst2 c -> pure $ ValCode2 (StxConst  c) -- readback!
+    _ ->  evalError2 (ExpectedValConstError2 v)
+eval2 (StxLam S xname body) = do -- readback!
+    xname' <- evalFreshName2 xname
+    body' <- scopedEnv2 $ do  
+       evalInsertEnv2 xname (ValCode2 (StxVar xname'))
+       eval2 body
+    body' <- val2ToCode2 body'
+    return  $ ValCode2 (StxLam D xname body')
+eval2 (StxApp S f x) = do -- readback!
+    cf <- eval2 f >>= val2ToCode2
+    cx <- eval2 x >>= val2ToCode2
+    return  $ ValCode2 (StxApp D cf cx)
+eval2 (StxFix S f) = do -- readback!
+    cf <- eval2 f >>= val2ToCode2  -- will this actually terminate? o_O I do have a monad! I might have to rewrite this using applicative..?
+    return $ ValCode2 (StxFix D cf)
+eval2 (StxIf S cond t e) = do -- readback!
+    ccond <- eval2 cond >>= val2ToCode2
+    ct <- eval2 t >>= val2ToCode2
+    ce <- eval2 e >>= val2ToCode2
+    return $ ValCode2 (StxIf D ccond ct ce)
+eval2 (StxOp S op args) = do -- readback!
+    cargs <- forM args (eval2 >=> val2ToCode2)
+    return $ ValCode2 (StxOp D op cargs)
 eval2 stx = evalError2 (UnknownStxError2 stx)
 
 -- ^^ L2 evaluator ^^
