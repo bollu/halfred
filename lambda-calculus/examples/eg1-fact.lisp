@@ -17,4 +17,5 @@
 (decl sndS (\ D n (\ D m (lift 40))))
 
 (decl cubeS ($ D ($ D powS ($ D powS sndS)) 3))
+(--   ("testCubeS",<code '(\D y.f (op * D (var y.f) (op * D (var y.f) (op * D (var y.f) (const 1)))))'>) --)
 (decl testCubeS (\ S y ($ D cubeS y)))
